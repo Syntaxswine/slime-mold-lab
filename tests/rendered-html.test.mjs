@@ -138,12 +138,16 @@ function soloAgent(seed, headingSamples) {
 }
 
 test("holds heading when the forward sensor is strongest (Jones 2010 clause 1)", () => {
-  const { simulation, settings } = soloAgent(4242, { forward: 40, left: 0, right: 0 });
+  // The flanks MUST differ. With left == right the buggy engine also leaves the
+  // heading alone -- both flank comparisons are false and it falls off the end
+  // of the chain -- so a symmetric fixture passes either way and proves nothing.
+  const { simulation, settings } = soloAgent(4242, { forward: 40, left: 10, right: 5 });
   const sensorAngle = (settings.sensorAngle * Math.PI) / 180;
   const at = (offset) =>
     sampleField(simulation, 100 + Math.cos(offset) * settings.sensorOffset,
                             100 + Math.sin(offset) * settings.sensorOffset);
   assert.ok(at(0) > at(-sensorAngle) && at(0) > at(sensorAngle), "fixture is not forward-dominant");
+  assert.notEqual(at(-sensorAngle), at(sensorAngle), "fixture flanks must not tie");
 
   advanceSimulation(simulation, settings);
 
@@ -235,22 +239,38 @@ test("keeps light discs closed to agents approaching from outside", () => {
   assert.equal(intruders, 0, `${intruders} agents entered a sealed light disc`);
 });
 
-test("renders the trail field well clear of the background", () => {
-  const settings = PRESETS.reticulate.settings;
-  const simulation = makeSimulation(settings.population, "reticulate", 41721);
-  for (let step = 0; step < 600; step += 1) advanceSimulation(simulation, settings);
+// A trail value of 3 stands in for vein body: it sits at or below the 90th
+// percentile of a live forage field (measured 3.04 on the original engine,
+// 4.53 on this one, both at 600 steps), so it is a conservative reference that
+// does not move when the engine does. The second assertion keeps it honest.
+const REFERENCE_TRAIL = 3;
 
+test("renders the trail field well clear of the background", () => {
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   const ramp = page.match(/1 - Math\.exp\(-sim\.trail\[i\] \* ([\d.]+)\)/);
   assert.ok(ramp, "could not find the trail intensity ramp in page.tsx");
   const k = Number(ramp[1]);
 
-  // The 90th percentile of a live field is the vein body — the thing the
-  // legend calls CHEMICAL FIELD. It has to be visibly above the #090b0a plate.
+  // The layer the legend calls CHEMICAL FIELD has to be visibly above the
+  // #090b0a plate (red 9). The original ramp put it at red 33; this one at 72.
+  const red = 8 + (1 - Math.exp(-REFERENCE_TRAIL * k)) * 176;
+  assert.ok(
+    red > 55,
+    `vein-body trail renders at red=${red.toFixed(0)}, barely off the plate's 9`,
+  );
+});
+
+test("keeps the render reference honest against a live field", () => {
+  const settings = PRESETS.forage.settings;
+  const simulation = makeSimulation(settings.population, "forage", 41721);
+  for (let step = 0; step < 600; step += 1) advanceSimulation(simulation, settings);
+
   const sorted = Float32Array.from(simulation.trail).sort();
   const p90 = sorted[Math.floor((sorted.length - 1) * 0.9)];
-  const red = 8 + (1 - Math.exp(-p90 * k)) * 176;
-  assert.ok(red > 60, `trail p90 renders at red=${red.toFixed(0)}, indistinguishable from the plate`);
+  assert.ok(
+    p90 >= REFERENCE_TRAIL,
+    `field p90 is ${p90.toFixed(2)}, below the ${REFERENCE_TRAIL} the ramp is calibrated against`,
+  );
 });
 
 test("wraps stimulus distance across periodic boundaries", () => {
