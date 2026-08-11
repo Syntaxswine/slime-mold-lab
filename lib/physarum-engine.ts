@@ -275,17 +275,20 @@ export function advanceSimulation(simulation: Simulation, settings: Settings) {
     const forward = sense(0);
     const left = sense(-sensorAngle);
     const right = sense(sensorAngle);
-    // Jones 2010 §2.1, in order. The first clause is load-bearing: without it
-    // an agent heading straight up-gradient still falls through to the
-    // left/right comparison and rotates away from its best sample, so no agent
-    // can ever hold a heading and veins never consolidate.
-    if (forward > left && forward > right) {
-      // Forward is strongest — keep facing the same direction.
-    } else if (forward < left && forward < right) {
+    // Jones 2010 §2.1. `forwardBest` is load-bearing: without it an agent
+    // heading straight up-gradient falls through to the flank comparison and
+    // rotates away from its best sample, so no agent can ever hold a heading
+    // and veins never consolidate. It is spelled out as a named condition
+    // rather than an empty leading branch so that nothing downstream — a
+    // minifier, a no-empty autofix — can quietly collapse the chain and put
+    // the defect back. The two cases are mutually exclusive by construction.
+    const forwardBest = forward > left && forward > right;
+    const forwardWorst = forward < left && forward < right;
+    if (forwardWorst) {
       angle += simulation.random() < 0.5 ? -turnAngle : turnAngle;
-    } else if (left > right) {
+    } else if (!forwardBest && left > right) {
       angle -= turnAngle;
-    } else if (right > left) {
+    } else if (!forwardBest && right > left) {
       angle += turnAngle;
     }
     angle += (simulation.random() - 0.5) * settings.wander;
