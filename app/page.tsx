@@ -174,7 +174,11 @@ export default function Home() {
 
       const data = pixels.data;
       for (let i = 0; i < sim.trail.length; i += 1) {
-        const intensity = 1 - Math.exp(-sim.trail[i] * 0.052);
+        // Calibrated against the field the sim actually produces, not against
+        // the 90 deposit clamp: measured p90 is 3-6 and the maximum ~19, so a
+        // gentler ramp left every trail pixel within a few RGB steps of the
+        // background and only agent occupancy was ever visible.
+        const intensity = 1 - Math.exp(-sim.trail[i] * 0.15);
         const x = i % GRID_W;
         const y = (i / GRID_W) | 0;
         const wave = 0.9 + 0.1 * Math.sin(frame * 0.045 + x * 0.095 - y * 0.07);
