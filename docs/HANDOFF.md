@@ -148,6 +148,15 @@ that actually discriminates 0.00 from 6.27.
 
 ## 7. Next step — "Living Weights"
 
+> **Phase 1 shipped 2026-08-12.** Read
+> [`LIVING-WEIGHTS.md`](LIVING-WEIGHTS.md), which supersedes this section for
+> anything that has since been measured. Four of the constraints predicted
+> below survived contact; one — baiting each channel with a weak food disc —
+> turned out to destroy the signal it was meant to create, and the record of
+> that is in the newer document. The rest of this section is kept as written,
+> because a prediction is only worth something if you can still see what it
+> said.
+
 The commissioned direction is a text-generation system in which the organism's
 changing physical state alters which word gets chosen: a language model supplies
 top-N next-token candidates with their logits, those candidates are assigned to

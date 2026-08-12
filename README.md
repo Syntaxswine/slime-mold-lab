@@ -68,6 +68,23 @@ node tools/render.mjs      # render PNGs headlessly (the preview pane can't)
 The original build is preserved at tag `codex-baseline`; `main` adds a reviewed
 set of fixes, each pinned by a test that fails against that tag.
 
+## Living Weights
+
+A second piece built on the same engine: a text generator in which the
+organism's state shifts a language model's next-token distribution before it is
+sampled. `/weights` in the app, or headless:
+
+```bash
+node tools/weights.mjs ab        # same seed, gain 0 vs gain 2, side by side
+node tools/weights.mjs channels  # channel fairness and the spread distribution
+node tools/weights.mjs sweep     # what the influence dial actually does
+```
+
+Read [`docs/LIVING-WEIGHTS.md`](docs/LIVING-WEIGHTS.md) first. Four of its
+design decisions are the opposite of the obvious one, each for a measured
+reason, and the constants are calibrated against numbers that will not survive
+being changed casually.
+
 ## Primary references
 
 - Jones, J. (2010). “Characteristics of Pattern Formation and Evolution in
