@@ -12,9 +12,15 @@
  *   node tools/weights.mjs ab           same seed, gain 0 vs gain G, side by side
  *   node tools/weights.mjs sweep        divergence against gain
  *   node tools/weights.mjs replay FILE  verify a run log three ways
+ *   node tools/weights.mjs recover      does the camera recover a KNOWN flux?
+ *   node tools/weights.mjs tape         record a sensor tape
+ *   node tools/weights.mjs calibrate    derive the constants from a quiet tape
  *
  * Flags: --seed --tokens --gain --mode --assignment --provider --preset
- *        --moldSteps --temperature --corpus --out
+ *        --moldSteps --temperature --corpus --out --tape --quiet --active
+ *
+ * `--provider` takes mold (default), sliders, camera (the simulated culture
+ * seen through the whole vision pipeline) or tape (a recording played back).
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -22,8 +28,20 @@ import { dirname } from "node:path";
 import { makeNgramAdapter } from "../lib/living-weights/adapters/ngram.ts";
 import { LivingWeightsRun } from "../lib/living-weights/generator.ts";
 import { parseRun, serializeRun } from "../lib/living-weights/log.ts";
+import { deriveCalibration, makeCameraProvider } from "../lib/living-weights/providers/camera.ts";
 import { makeMoldProvider } from "../lib/living-weights/providers/mold.ts";
 import { makeSliderProvider } from "../lib/living-weights/providers/sliders.ts";
+import {
+  dishForSimulation,
+  makeSimulatedFrameSource,
+} from "../lib/living-weights/providers/synthetic-frames.ts";
+import {
+  makeTapeProvider,
+  parseTape,
+  recordTape,
+  serializeTape,
+  summarizeTape,
+} from "../lib/living-weights/tape.ts";
 import { rerun, verifyChain, verifyRun } from "../lib/living-weights/replay.ts";
 import { DEFAULT_NORMALIZE } from "../lib/living-weights/weights.ts";
 
@@ -52,8 +70,32 @@ function adapter() {
 function provider(seedOffset = 0) {
   const kind = flag("provider", "mold");
   const seed = num("seed", 20260811) + seedOffset;
+  const tapeFile = flag("tape", null);
+  // A tape wins over everything. If one was named, replaying it IS the run,
+  // and quietly building a live provider alongside would make an A/B compare
+  // two different organisms while claiming to compare two gains.
+  if (tapeFile || kind === "tape") {
+    if (!tapeFile) throw new Error("--provider tape needs --tape <file>");
+    return makeTapeProvider(parseTape(readFileSync(tapeFile, "utf8")));
+  }
   if (kind === "sliders") return makeSliderProvider({ seed });
+  if (kind === "camera") return cameraOverSimulation(seed, { bare: argv.includes("--bare") });
   return makeMoldProvider({ seed, preset: flag("preset", "forage") });
+}
+
+/** The camera pipeline pointed at a simulated culture. The demo and the test rig. */
+function cameraOverSimulation(seed, sourceOptions = {}) {
+  const mold = makeMoldProvider({ seed, preset: flag("preset", "forage") });
+  const source = makeSimulatedFrameSource(mold, {
+    ticksPerFrame: num("ticksPerFrame", 6),
+    ...sourceOptions,
+  });
+  const camera = makeCameraProvider(source, {
+    dish: dishForSimulation(mold, source.config),
+    qualityFrames: num("qualityFrames", 6),
+  });
+  camera.mold = mold;
+  return camera;
 }
 
 function controls() {
@@ -257,7 +299,199 @@ async function replay() {
 
 /* ------------------------------------------------------------------ */
 
-const sections = { channels, run: runSection, ab, sweep, replay };
+/* ------------------------------------------------------------------ */
+
+/**
+ * Does looking at the plate recover what the plate is doing?
+ *
+ * There is no ground truth for a real dish, so this asks the question where
+ * there is one: the simulation knows its own per-channel flux exactly, so
+ * rendering it to frames, reading those frames back through the whole vision
+ * pipeline, and correlating the two is a direct test of the arithmetic.
+ *
+ * The first version of that arithmetic scored 0.04 here while passing every
+ * other check in the repo, which is the entire reason this section exists.
+ */
+async function recover() {
+  const READS = num("reads", 12);
+  const FRAMES = num("qualityFrames", 8);
+
+  const rank = (v) => {
+    const order = v.map((x, i) => [x, i]).sort((a, b) => a[0] - b[0]);
+    const out = new Array(v.length);
+    order.forEach(([, i], k) => { out[i] = k; });
+    return out;
+  };
+  const spearman = (a, b) => {
+    const ra = rank(a), rb = rank(b), m = (a.length - 1) / 2;
+    let acc = 0, da = 0, db = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      acc += (ra[i] - m) * (rb[i] - m);
+      da += (ra[i] - m) ** 2;
+      db += (rb[i] - m) ** 2;
+    }
+    return acc / Math.sqrt(da * db);
+  };
+
+  console.log(`\n=== can the camera see what the culture is doing? (${READS} reads) ===\n`);
+  console.log("  rig                  spearman   leader   quality   faults");
+  for (const [label, options] of [
+    ["clean", {}],
+    ["grainy but steady", { grain: 10 }],
+    ["someone walks past", { benchNoise: 8, disturbAfterFrames: 40 }],
+    ["light ramps mid-run", { exposureDriftPerFrame: 0.006, disturbAfterFrames: 40 }],
+    ["defocused", { blurPasses: 2 }],
+  ]) {
+    const camera = cameraOverSimulation(num("seed", 4242), options);
+    camera.advance(20);
+    camera.readSignals(8);
+    camera.mold.readSignals(8);
+
+    let s = 0, q = 0, hits = 0;
+    for (let i = 0; i < READS; i += 1) {
+      camera.advance(FRAMES);
+      const seen = camera.readSignals(8);
+      const truth = camera.mold.readSignals(8).map((x) => x.raw);
+      const raw = seen.map((x) => x.raw);
+      s += spearman(raw, truth);
+      q += seen[0].quality;
+      if (raw.indexOf(Math.max(...raw)) === truth.indexOf(Math.max(...truth))) hits += 1;
+    }
+    // A correlation computed on a refused reading is meaningless: quality zero
+    // means every channel came back zero, and ranking a constant vector
+    // produces whatever the sort happened to do. Say refused, not 0.59.
+    const meanQuality = q / READS;
+    const score = meanQuality < 0.05 ? "REFUSED" : (s / READS).toFixed(2);
+    console.log(`  ${label.padEnd(20)} ${score.padStart(8)} ` +
+      `${(meanQuality < 0.05 ? "-" : `${((hits / READS) * 100).toFixed(0)}%`).padStart(8)} ` +
+      `${meanQuality.toFixed(2).padStart(9)}   ` +
+      (camera.lastFaults.map((f) => f.reason).join("; ") || "none"));
+  }
+  console.log("\n  A clean rig should track the truth; the other three should be REFUSED,");
+  console.log("  not merely score worse. A confident wrong answer is the failure mode.");
+}
+
+/* ------------------------------------------------------------------ */
+
+/** Record what a provider says, so a run against it can be replayed forever. */
+async function tape() {
+  const reads = num("reads", 60);
+  const steps = num("moldSteps", 30);
+  const inner = provider();
+  const recorder = recordTape(inner);
+  for (let i = 0; i < reads; i += 1) {
+    recorder.advance(steps);
+    // Camera diagnostics ride along on the tape so `calibrate` can set the
+    // focus rail from what this rig actually produced, rather than from a
+    // constant that means nothing outside the bench it was written on.
+    if (typeof inner.lastFocus === "number") {
+      recorder.note({
+        focus: inner.lastFocus,
+        sessionDrift: inner.lastSessionDrift,
+        faults: inner.lastFaults.map((f) => f.reason),
+      });
+    }
+    recorder.readSignals(8);
+  }
+
+  const summary = summarizeTape(recorder.tape);
+  console.log(`\n=== ${recorder.tape.header.providerId} — ${summary.reads} reads ===\n`);
+  console.log("  channel mean " + summary.channelMeans.map((m) => m.toFixed(3).padStart(9)).join(""));
+  console.log("  channel sd   " + summary.channelSds.map((m) => m.toFixed(3).padStart(9)).join(""));
+  console.log(`\n  between channels ${summary.betweenChannel.toFixed(4)}   within a channel ${summary.withinChannel.toFixed(4)}`);
+  console.log(summary.betweenChannel < summary.withinChannel
+    ? "  -> fair: where a channel sits explains less than what the organism did."
+    : "  -> WARNING: position explains more than time. The rig is choosing the words.");
+  console.log(`  spread p05 ${summary.spread.p05.toFixed(4)}  p50 ${summary.spread.p50.toFixed(4)}  p95 ${summary.spread.p95.toFixed(4)}`);
+  console.log(`  mean quality ${summary.meanQuality.toFixed(2)}`);
+
+  const out = flag("out", null);
+  if (out) {
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, serializeTape(recorder.tape));
+    console.log(`\n  tape -> ${out}`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+
+/**
+ * Derive the constants from recordings instead of inheriting them.
+ *
+ * Nothing calibrated on the lattice transfers. There `raw` was landings per
+ * tick, in the tens; here it is a dimensionless relative change three orders
+ * of magnitude smaller. Every threshold downstream has to be re-derived
+ * against the actual rig, and this is where that happens.
+ */
+async function calibrate() {
+  const quietFile = flag("quiet", positional[0] ?? null);
+  if (!quietFile) {
+    throw new Error("usage: node tools/weights.mjs calibrate --quiet <tape> [--active <tape>]");
+  }
+  const quiet = parseTape(readFileSync(quietFile, "utf8"));
+  const activeFile = flag("active", null);
+  const active = activeFile ? parseTape(readFileSync(activeFile, "utf8")) : null;
+  const quietSummary = summarizeTape(quiet);
+
+  console.log(`\n=== calibration from ${quietFile} (${quietSummary.reads} reads) ===\n`);
+
+  // A quiet tape must actually be quiet. Offsets measured while the culture is
+  // working subtract the culture, and the piece then runs beautifully and
+  // means nothing — so this refuses rather than obliges.
+  //
+  // Judged on pattern inertia, not on magnitude and not on relative variation.
+  // A bare plate's residuals are white noise and score near zero; a culture
+  // scores high because whatever it was doing a moment ago it is still mostly
+  // doing. Measured on this rig: -0.06 bare against 0.87 live.
+  const INERTIA_LIMIT = 0.35;
+  console.log(`  pattern inertia ${quietSummary.inertia.toFixed(3)} ` +
+    `(a bare rig scores near 0; something alive scores well above ${INERTIA_LIMIT})`);
+  if (quietSummary.inertia > INERTIA_LIMIT) {
+    console.log("\n  REFUSED. Something in this recording has spatial memory, so it is not a");
+    console.log("  quiet rig. Record the offsets on a bare plate, or on a dormant culture:");
+    console.log("  an offset measured with the organism working subtracts the organism.");
+    process.exitCode = 1;
+    return;
+  }
+  if (active) {
+    const activeSummary = summarizeTape(active);
+    if (activeSummary.grandMean > 0 && quietSummary.grandMean > activeSummary.grandMean * 0.25) {
+      console.log("\n  REFUSED. The quiet tape reads within a factor of four of the live one.");
+      console.log(`  quiet ${quietSummary.grandMean.toExponential(2)} against live ` +
+        `${activeSummary.grandMean.toExponential(2)}. One of the two is mislabelled.`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const focusSamples = quiet.reads
+    .map((r) => (typeof r.notes?.focus === "number" ? r.notes.focus : null))
+    .filter((v) => v !== null);
+
+  const derived = deriveCalibration(
+    quiet.reads.map((r) => r.raw),
+    (active ?? quiet).reads.map((r) => r.raw),
+    focusSamples,
+  );
+
+  console.log("  offset " + derived.calibration.offset.map((v) => v.toFixed(4).padStart(9)).join(""));
+  console.log("  scale  " + derived.calibration.scale.map((v) => v.toFixed(4).padStart(9)).join(""));
+  console.log("\n  suggested NormalizeOptions:");
+  console.log(`    spreadFloor   ${derived.suggestedNormalize.spreadFloor.toExponential(3)}`);
+  console.log(`    deadband      ${derived.suggestedNormalize.deadband.toExponential(3)}`);
+  console.log(`    activeSpread  ${derived.suggestedNormalize.activeSpread.toExponential(3)}`);
+  console.log(derived.suggestedFocus
+    ? `    focus band    good ${derived.suggestedFocus.good.toFixed(0)}, ceiling ${derived.suggestedFocus.ceiling.toFixed(0)}`
+    : "    focus band    NOT DERIVED — this tape carried no focus samples, so the\n" +
+      "                  default is still a number from another bench. Record a\n" +
+      "                  camera tape before trusting the focus rail.");
+  if (!active) {
+    console.log("\n  No --active tape, so scale and activeSpread were derived from the quiet");
+    console.log("  recording itself. They describe silence. Record a live tape.");
+  }
+}
+
+const sections = { channels, run: runSection, ab, sweep, replay, recover, tape, calibrate };
 const chosen = sections[section];
 if (!chosen) {
   console.error(`unknown section "${section}". try: ${Object.keys(sections).join(", ")}`);
