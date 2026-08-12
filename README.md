@@ -52,6 +52,22 @@ npm run lint
 The deployment target is the Sites vinext runtime. No persistent storage or
 authentication is required.
 
+### Before changing the engine
+
+Read [`docs/HANDOFF.md`](docs/HANDOFF.md). The engine's behaviour is
+counter-intuitive in ways that have already cost time — 77–88% of agent moves
+are blocked, a food marker at full strength is a gridlock sink with zero
+throughput, and the trail half-life is 8 steps. Those numbers, the operating
+windows they imply, and the open issues are all there.
+
+```bash
+node tools/measure.mjs     # reproduce every measured claim in the handoff
+node tools/render.mjs      # render PNGs headlessly (the preview pane can't)
+```
+
+The original build is preserved at tag `codex-baseline`; `main` adds a reviewed
+set of fixes, each pinned by a test that fails against that tag.
+
 ## Primary references
 
 - Jones, J. (2010). “Characteristics of Pattern Formation and Evolution in
