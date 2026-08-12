@@ -216,17 +216,26 @@ export function resizePopulation(simulation: Simulation, nextCount: number) {
   for (let i = 0; i < safeCount; i += 1) simulation.order[i] = i;
 }
 
+/** Squared distance to a marker across the periodic lattice. */
+function wrappedD2(marker: Marker, x: number, y: number) {
+  const rawDx = Math.abs(x - marker.x);
+  const rawDy = Math.abs(y - marker.y);
+  const dx = Math.min(rawDx, GRID_W - rawDx);
+  const dy = Math.min(rawDy, GRID_H - rawDy);
+  return dx * dx + dy * dy;
+}
+
+function insideMarker(marker: Marker, x: number, y: number) {
+  return wrappedD2(marker, x, y) < marker.radius * marker.radius;
+}
+
 export function sampleField(simulation: Simulation, x: number, y: number) {
   const xi = ((Math.round(x) % GRID_W) + GRID_W) % GRID_W;
   const yi = ((Math.round(y) % GRID_H) + GRID_H) % GRID_H;
   let value = simulation.trail[yi * GRID_W + xi];
 
   for (const marker of simulation.markers) {
-    const rawDx = Math.abs(xi - marker.x);
-    const rawDy = Math.abs(yi - marker.y);
-    const dx = Math.min(rawDx, GRID_W - rawDx);
-    const dy = Math.min(rawDy, GRID_H - rawDy);
-    const d2 = dx * dx + dy * dy;
+    const d2 = wrappedD2(marker, xi, yi);
     // Explicit visual-model extensions: positive food and negative light fields.
     if (marker.kind === "food" && marker.level > 0.015) {
       value += (marker.level * 4300) / (d2 + 42);
@@ -266,11 +275,20 @@ export function advanceSimulation(simulation: Simulation, settings: Settings) {
     const forward = sense(0);
     const left = sense(-sensorAngle);
     const right = sense(sensorAngle);
-    if (forward < left && forward < right) {
+    // Jones 2010 §2.1. `forwardBest` is load-bearing: without it an agent
+    // heading straight up-gradient falls through to the flank comparison and
+    // rotates away from its best sample, so no agent can ever hold a heading
+    // and veins never consolidate. It is spelled out as a named condition
+    // rather than an empty leading branch so that nothing downstream — a
+    // minifier, a no-empty autofix — can quietly collapse the chain and put
+    // the defect back. The two cases are mutually exclusive by construction.
+    const forwardBest = forward > left && forward > right;
+    const forwardWorst = forward < left && forward < right;
+    if (forwardWorst) {
       angle += simulation.random() < 0.5 ? -turnAngle : turnAngle;
-    } else if (left > right) {
+    } else if (!forwardBest && left > right) {
       angle -= turnAngle;
-    } else if (right > left) {
+    } else if (!forwardBest && right > left) {
       angle += turnAngle;
     }
     angle += (simulation.random() - 0.5) * settings.wander;
@@ -283,11 +301,16 @@ export function advanceSimulation(simulation: Simulation, settings: Settings) {
 
     for (const marker of simulation.markers) {
       if (marker.kind !== "light") continue;
-      const rawDx = Math.abs(nx - marker.x);
-      const rawDy = Math.abs(ny - marker.y);
-      const dx = Math.min(rawDx, GRID_W - rawDx);
-      const dy = Math.min(rawDy, GRID_H - rawDy);
-      if (dx * dx + dy * dy < marker.radius * marker.radius) blocked = true;
+      // A light disc is a barrier to entry, not a cage. An agent that was
+      // already standing inside one when it was placed must be able to walk
+      // back out: the radius is many cells wide and a step is one cell, so
+      // testing the destination alone rejects every escape route and freezes
+      // the agent in place forever.
+      if (insideMarker(marker, px, py)) continue;
+      if (insideMarker(marker, nx, ny)) {
+        blocked = true;
+        break;
+      }
     }
 
     if (blocked) {
@@ -304,11 +327,7 @@ export function advanceSimulation(simulation: Simulation, settings: Settings) {
 
     for (const marker of simulation.markers) {
       if (marker.kind !== "food") continue;
-      const rawDx = Math.abs(nx - marker.x);
-      const rawDy = Math.abs(ny - marker.y);
-      const dx = Math.min(rawDx, GRID_W - rawDx);
-      const dy = Math.min(rawDy, GRID_H - rawDy);
-      if (dx * dx + dy * dy < marker.radius * marker.radius) {
+      if (insideMarker(marker, nx, ny)) {
         marker.level = Math.max(0, marker.level - 0.0000012);
       }
     }
