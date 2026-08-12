@@ -22,9 +22,12 @@ import {
   summarizeTape,
 } from "../lib/living-weights/tape.ts";
 import {
+  CONTRACTION_BAND,
   DEFAULT_QUALITY_LIMITS,
   backgroundRegions,
+  bandPower,
   frameQuality,
+  logTransmittance,
   readFrames,
 } from "../lib/living-weights/vision.ts";
 
@@ -208,13 +211,157 @@ test("each quality rail fires on its own", () => {
   }
 });
 
+/* --- the contraction band -------------------------------------------- */
+
+test("band power hears a rhythm that broadband cannot hear at all", () => {
+  const dt = 6;
+  const n = 128;
+  const period = 131;
+  let seed = 12345;
+  const noise = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296 - 0.5;
+  };
+
+  const rhythmic = [];
+  const noisy = [];
+  for (let i = 0; i < n; i += 1) {
+    // Grain of the same order as the rhythm: peak-to-peak 2 against amplitude
+    // 1. Identical noise in both series, so the only difference is the rhythm.
+    const grain = noise() * 2;
+    rhythmic.push(Math.sin((2 * Math.PI * i * dt) / period) + grain);
+    noisy.push(grain);
+  }
+
+  const band = (v) => bandPower(v, dt, CONTRACTION_BAND.lowHz, CONTRACTION_BAND.highHz);
+  const broad = (v) => {
+    let sum = 0;
+    for (let i = 1; i < v.length; i += 1) sum += Math.abs(v[i] - v[i - 1]);
+    return sum / (v.length - 1);
+  };
+
+  const bandRatio = band(rhythmic) / band(noisy);
+  const broadRatio = broad(rhythmic) / broad(noisy);
+
+  assert.ok(bandRatio > 3, `the band did not isolate the rhythm: ${bandRatio.toFixed(2)}x`);
+  // The point, and it is stark. Frame-to-frame change is dominated by whatever
+  // moves fastest, which at this noise level is the noise, so broadband is
+  // blind to a rhythm of comparable amplitude. Measured at grain 1, 2, 4 and 8
+  // the broadband ratio is 1.07, 1.02, 1.01, 1.00 — it never sees it.
+  assert.ok(broadRatio < 1.2, `broadband unexpectedly heard the rhythm: ${broadRatio.toFixed(2)}x`);
+  assert.ok(bandRatio > broadRatio * 2.5);
+
+  // And it must be the BAND doing the work, not the amplitude. A rhythm well
+  // outside the contraction band has to be rejected just as firmly.
+  const tooFast = Array.from({ length: n }, (_, i) => Math.sin((2 * Math.PI * i * dt) / 12));
+  assert.ok(
+    band(tooFast) < band(rhythmic) * 0.25,
+    "a 12-second rhythm was counted as a peristaltic contraction",
+  );
+});
+
+test("a steady ramp is detrended away rather than counted as activity", () => {
+  // Growth moves a region's optical thickness steadily over minutes. Without
+  // the detrend the ramp leaks across every bin and reads as a strong rhythm.
+  const ramp = Array.from({ length: 128 }, (_, i) => i * 0.01);
+  assert.ok(bandPower(ramp, 6) < 1e-3, `a ramp read as rhythm: ${bandPower(ramp, 6)}`);
+});
+
+test("log transmittance is a ratio against the illumination, not a level", () => {
+  // Double the lamp and the organism's optical thickness must not change.
+  const dim = logTransmittance(60, 30);
+  const bright = logTransmittance(120, 60);
+  assert.ok(Math.abs(dim - bright) < 1e-9, `${dim} vs ${bright}`);
+});
+
+test("the contraction band separates a living culture from a still one", () => {
+  // THE reason band-power is the default. Broadband cannot make this
+  // distinction at all: measured, it separates a pulsing culture from the same
+  // culture with no rhythm by 1.1x, while the band separates them by 10.7x.
+  // On a real plate there is no ground truth for "flux", and the quantity that
+  // actually matters is whether a region is alive and pumping — a sclerotium,
+  // a dead tube and a compression artefact all produce broadband change.
+  const FRAME_MS = 6000;
+  const WINDOW = 512;
+
+  const level = (estimator, options) => {
+    const mold = makeMoldProvider({ seed: 4242 });
+    const source = makeSimulatedFrameSource(mold, {
+      frameIntervalMs: FRAME_MS,
+      ticksPerFrame: 6,
+      ...options,
+    });
+    const camera = makeCameraProvider(source, {
+      dish: dishForSimulation(mold, source.config),
+      estimator,
+      windowSeconds: WINDOW,
+      qualityFrames: 10,
+    });
+    camera.advance(WINDOW / (FRAME_MS / 1000) + 12);
+    camera.readSignals(8);
+    camera.advance(10);
+    const raw = camera.readSignals(8).map((s) => s.raw);
+    return raw.reduce((a, b) => a + b, 0) / raw.length;
+  };
+
+  const pulsing = level("band-power", {});
+  const still = level("band-power", { contractionAmplitude: 0 });
+  assert.ok(
+    pulsing > still * 4,
+    `the band cannot hear the difference: pulsing ${pulsing.toExponential(2)}, still ${still.toExponential(2)}`,
+  );
+
+  const broadPulsing = level("broadband", {});
+  const broadStill = level("broadband", { contractionAmplitude: 0 });
+  assert.ok(
+    broadPulsing < broadStill * 2,
+    "broadband started discriminating rhythm; re-read why the default is band-power",
+  );
+  assert.ok(
+    pulsing / still > (broadPulsing / broadStill) * 3,
+    "the band no longer beats broadband at telling alive from merely changing",
+  );
+});
+
+test("band power refuses to speak before it has heard whole cycles", () => {
+  const mold = makeMoldProvider({ seed: 909 });
+  const source = makeSimulatedFrameSource(mold, { frameIntervalMs: 6000, ticksPerFrame: 6 });
+  const camera = makeCameraProvider(source, {
+    dish: dishForSimulation(mold, source.config),
+    estimator: "band-power",
+    windowSeconds: 512,
+  });
+
+  // Twelve frames is 72 seconds: less than one 131-second cycle. The lowest
+  // bins of the band do not exist yet, and an estimator that answered here
+  // would be reporting whatever the next bins up happened to contain.
+  camera.advance(12);
+  const early = camera.readSignals(8);
+  assert.ok(early.every((s) => s.quality < 0.35), `spoke too early: ${early[0].quality}`);
+
+  camera.advance(90);
+  const later = camera.readSignals(8);
+  assert.ok(later[0].quality > 0.9, `never became confident: ${later[0].quality}`);
+  assert.ok(camera.frameIntervalSeconds > 5.9 && camera.frameIntervalSeconds < 6.1);
+});
+
 /* --- the camera against a known truth -------------------------------- */
 
 function recoverySpearman(sourceOptions, reads = 12, framesPerRead = 8) {
   const mold = makeMoldProvider({ seed: 4242 });
   const source = makeSimulatedFrameSource(mold, sourceOptions);
   const dish = dishForSimulation(mold, source.config);
-  const camera = makeCameraProvider(source, { dish, qualityFrames: framesPerRead });
+  // Broadband on purpose. The ground truth available here is the simulation's
+  // per-channel FLUX — agent movement — and broadband change is a direct image
+  // of exactly that, so it is the right estimator to score the optics and the
+  // quality rails against. Band power answers a different and, on a real
+  // plate, more useful question; "the contraction band separates a living
+  // culture from a still one" is where that gets tested.
+  const camera = makeCameraProvider(source, {
+    dish,
+    estimator: "broadband",
+    qualityFrames: framesPerRead,
+  });
   camera.advance(20);
   camera.readSignals(8);
   mold.readSignals(8);
@@ -306,7 +453,7 @@ test("a per-channel offset is subtracted from raw, not merely from the display",
   const source = makeSimulatedFrameSource(mold, {});
   const dish = dishForSimulation(mold, source.config);
 
-  const plain = makeCameraProvider(source, { dish });
+  const plain = makeCameraProvider(source, { dish, estimator: "broadband" });
   plain.advance(24);
   const before = plain.readSignals(8).map((s) => s.raw);
 
@@ -314,7 +461,7 @@ test("a per-channel offset is subtracted from raw, not merely from the display",
   const source2 = makeSimulatedFrameSource(mold2, {});
   const offset = flatCalibration(8);
   offset.offset = new Array(8).fill(before[0]);
-  const corrected = makeCameraProvider(source2, { dish, calibration: offset });
+  const corrected = makeCameraProvider(source2, { dish, estimator: "broadband", calibration: offset });
   corrected.advance(24);
   const after = corrected.readSignals(8).map((s) => s.raw);
 
@@ -421,7 +568,10 @@ test("pattern inertia tells a bare rig from a living one", () => {
   const record = (bare) => {
     const mold = makeMoldProvider({ seed: 4242 });
     const source = makeSimulatedFrameSource(mold, { bare });
-    const camera = makeCameraProvider(source, { dish: dishForSimulation(mold, source.config) });
+    const camera = makeCameraProvider(source, {
+      dish: dishForSimulation(mold, source.config),
+      estimator: "broadband",
+    });
     const recorder = recordTape(camera, () => 0);
     for (let i = 0; i < 25; i += 1) {
       recorder.advance(6);

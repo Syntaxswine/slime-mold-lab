@@ -15,6 +15,7 @@
  *   node tools/weights.mjs recover      does the camera recover a KNOWN flux?
  *   node tools/weights.mjs tape         record a sensor tape
  *   node tools/weights.mjs calibrate    derive the constants from a quiet tape
+ *   node tools/weights.mjs pulse        alive, or merely changing?
  *
  * Flags: --seed --tokens --gain --mode --assignment --provider --preset
  *        --moldSteps --temperature --corpus --out --tape --quiet --active
@@ -491,7 +492,101 @@ async function calibrate() {
   }
 }
 
-const sections = { channels, run: runSection, ab, sweep, replay, recover, tape, calibrate };
+/* ------------------------------------------------------------------ */
+
+/**
+ * Alive, or merely changing?
+ *
+ * The distinction the whole camera provider turns on. Frame-to-frame change is
+ * produced by a growing culture, a dead tube under a flickering lamp, sensor
+ * grain and a compression artefact alike. The plasmodium's peristaltic
+ * contraction, at 131 +/- 43 s (Alim et al. 2013, PNAS 110(33):13306), is
+ * produced by none of those, so restricting the reading to that band is a
+ * matched filter for an organism that is still working.
+ *
+ * This runs the same culture with its rhythm on and off and reports what each
+ * estimator makes of the difference.
+ */
+async function pulse() {
+  const FRAME_MS = num("frameMs", 6000);
+  const WINDOW = num("windowSeconds", 512);
+  const READS = num("reads", 8);
+  const PER_READ = num("moldSteps", 10);
+
+  const rank = (v) => {
+    const order = v.map((x, i) => [x, i]).sort((a, b) => a[0] - b[0]);
+    const out = new Array(v.length);
+    order.forEach(([, i], k) => { out[i] = k; });
+    return out;
+  };
+  const spearman = (a, b) => {
+    const ra = rank(a), rb = rank(b), m = (a.length - 1) / 2;
+    let acc = 0, da = 0, db = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      acc += (ra[i] - m) * (rb[i] - m);
+      da += (ra[i] - m) ** 2;
+      db += (rb[i] - m) ** 2;
+    }
+    return da === 0 || db === 0 ? 0 : acc / Math.sqrt(da * db);
+  };
+
+  const measure = (estimator, options) => {
+    const mold = makeMoldProvider({ seed: num("seed", 4242) });
+    const source = makeSimulatedFrameSource(mold, {
+      frameIntervalMs: FRAME_MS,
+      ticksPerFrame: 6,
+      ...options,
+    });
+    const camera = makeCameraProvider(source, {
+      dish: dishForSimulation(mold, source.config),
+      estimator,
+      windowSeconds: WINDOW,
+      qualityFrames: PER_READ,
+    });
+    camera.advance(Math.round(WINDOW / (FRAME_MS / 1000)) + 12);
+    camera.readSignals(8);
+    mold.readSignals(8);
+
+    let level = 0, s = 0;
+    for (let i = 0; i < READS; i += 1) {
+      camera.advance(PER_READ);
+      const raw = camera.readSignals(8).map((x) => x.raw);
+      const truth = mold.readSignals(8).map((x) => x.raw);
+      level += raw.reduce((a, b) => a + b, 0) / 8 / READS;
+      s += spearman(raw, truth) / READS;
+    }
+    return { level, spearman: s };
+  };
+
+  console.log(`\n=== alive, or merely changing? (${WINDOW}s window, ${FRAME_MS / 1000}s frames) ===\n`);
+  console.log("  estimator     rig                    mean raw   vs flux");
+  const seen = {};
+  for (const estimator of ["band-power", "broadband"]) {
+    for (const [label, options] of [
+      ["pulsing culture", {}],
+      ["same culture, no rhythm", { contractionAmplitude: 0 }],
+      ["bare plate, grain", { bare: true, grain: 8 }],
+    ]) {
+      const r = measure(estimator, options);
+      seen[`${estimator}|${label}`] = r.level;
+      console.log(`  ${estimator.padEnd(13)} ${label.padEnd(23)} ${r.level.toExponential(2).padStart(9)} ` +
+        `${r.spearman.toFixed(2).padStart(9)}`);
+    }
+  }
+
+  console.log("\n  telling a living region from a still one:");
+  for (const estimator of ["band-power", "broadband"]) {
+    const on = seen[`${estimator}|pulsing culture`];
+    const off = seen[`${estimator}|same culture, no rhythm`];
+    console.log(`    ${estimator.padEnd(13)} ${(on / Math.max(off, 1e-12)).toFixed(1)}x`);
+  }
+  console.log("\n  Broadband scores slightly better against FLUX, and should: flux is agent");
+  console.log("  movement and broadband change is a direct image of it. But a real plate");
+  console.log("  offers no ground-truth flux, and a sclerotium, a dead tube and a JPEG");
+  console.log("  artefact all produce change. Only the band asks whether it is still alive.");
+}
+
+const sections = { channels, run: runSection, ab, sweep, replay, recover, tape, calibrate, pulse };
 const chosen = sections[section];
 if (!chosen) {
   console.error(`unknown section "${section}". try: ${Object.keys(sections).join(", ")}`);

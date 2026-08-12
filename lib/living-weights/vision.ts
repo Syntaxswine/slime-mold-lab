@@ -445,6 +445,112 @@ export function frameQuality(
   return { quality: drift * clip * exposure * interval * focus * unreferenced, faults };
 }
 
+/* --- the contraction band -------------------------------------------- */
+
+/**
+ * The plasmodium's peristaltic rhythm, in hertz.
+ *
+ * Alim, Amselem, Peaudecerf, Brenner & Pringle (2013), "Random network
+ * peristalsis in Physarum polycephalum organizes fluid flows across an
+ * individual", PNAS 110(33):13306-13311, doi:10.1073/pnas.1305049110, measure
+ * a period of 131 +/- 43 s within one organism over an hour and a half, and
+ * argue that spread is evidence the period is CONSTANT across tube segments
+ * rather than variable. Independent labs land nearby: ~120 s (Schick, Kramar &
+ * Alim 2024, arXiv:2408.17134), ~100 s (Saiseau, Busson & Durand,
+ * J. R. Soc. Interface 23:20250971), and 1-2 minutes rising logarithmically
+ * with body size from 100 um to 10 cm (Kuroda, Takagi, Nakagaki & Ueda 2015,
+ * J. Exp. Biol. 218(23):3729-3738).
+ *
+ * 60-200 s covers all of it with margin.
+ */
+export const CONTRACTION_BAND = { lowHz: 1 / 200, highHz: 1 / 60 };
+
+/**
+ * Log transmittance of a region against the illumination reference.
+ *
+ * Under transillumination the plasmodium is a translucent absorber, so
+ * -ln(I/I0) is proportional to optical thickness — the relation Kuroda et al.
+ * (2015) calibrate against glass tubes of known diameter to recover absolute
+ * thickness, and Schick et al. (2024) use to read grey value as biomass. The
+ * peristaltic contraction modulates cross-section, so it appears in this
+ * quantity as a near-sinusoid.
+ *
+ * The sign depends on the rig: an organism lit from below is darker than its
+ * background, one lit from above is brighter. Band power is unaffected either
+ * way, so this returns the signed log ratio and leaves the convention alone.
+ */
+export function logTransmittance(regionLuminance: number, reference: number): number {
+  return Math.log(Math.max(regionLuminance, 1) / Math.max(reference, 1));
+}
+
+/**
+ * RMS amplitude of the signal within a frequency band.
+ *
+ * This is the reason to prefer it over the mean absolute frame-to-frame
+ * change: |dI| is broadband, so it is owned by whatever makes the largest
+ * change, and almost everything that goes wrong with a camera makes a large
+ * broadband change. A band restricted to the contraction rhythm is a matched
+ * filter for an organism that is ALIVE AND PUMPING, and it reads near zero on
+ * sensor grain, on compression artefacts, on a slow illumination ramp, on a
+ * sclerotium and on a dead tube — all of which a broadband estimator reports
+ * as activity.
+ *
+ * Linear detrend, Hann taper, one-sided periodogram, sum the bins inside the
+ * band. Detrending first matters: growth moves a region's optical thickness
+ * steadily over minutes, and an untapered ramp leaks across every bin.
+ */
+export function bandPower(
+  samples: number[],
+  dtSeconds: number,
+  lowHz = CONTRACTION_BAND.lowHz,
+  highHz = CONTRACTION_BAND.highHz,
+): number {
+  const n = samples.length;
+  if (n < 8 || dtSeconds <= 0) return 0;
+
+  // Least-squares linear detrend.
+  let sumX = 0;
+  let sumY = 0;
+  let sumXY = 0;
+  let sumXX = 0;
+  for (let i = 0; i < n; i += 1) {
+    sumX += i;
+    sumY += samples[i];
+    sumXY += i * samples[i];
+    sumXX += i * i;
+  }
+  const denominator = n * sumXX - sumX * sumX;
+  const slope = denominator === 0 ? 0 : (n * sumXY - sumX * sumY) / denominator;
+  const intercept = (sumY - slope * sumX) / n;
+
+  const windowed = new Float64Array(n);
+  let windowEnergy = 0;
+  for (let i = 0; i < n; i += 1) {
+    const w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+    windowed[i] = (samples[i] - (intercept + slope * i)) * w;
+    windowEnergy += w * w;
+  }
+  if (windowEnergy <= 0) return 0;
+
+  const resolution = 1 / (n * dtSeconds);
+  const firstBin = Math.max(1, Math.ceil(lowHz / resolution));
+  const lastBin = Math.min(Math.floor(n / 2), Math.floor(highHz / resolution));
+  if (lastBin < firstBin) return 0;
+
+  let power = 0;
+  for (let k = firstBin; k <= lastBin; k += 1) {
+    let re = 0;
+    let im = 0;
+    for (let i = 0; i < n; i += 1) {
+      const angle = (-2 * Math.PI * k * i) / n;
+      re += windowed[i] * Math.cos(angle);
+      im += windowed[i] * Math.sin(angle);
+    }
+    power += (2 * (re * re + im * im)) / windowEnergy;
+  }
+  return Math.sqrt(power) / n;
+}
+
 function clamp01(v: number) {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }

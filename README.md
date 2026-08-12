@@ -78,12 +78,19 @@ sampled. `/weights` in the app, or headless:
 node tools/weights.mjs ab        # same seed, gain 0 vs gain 2, side by side
 node tools/weights.mjs channels  # channel fairness and the spread distribution
 node tools/weights.mjs sweep     # what the influence dial actually does
+node tools/weights.mjs pulse     # alive, or merely changing?
+node tools/weights.mjs recover   # can a camera see what the culture is doing?
 ```
 
 Read [`docs/LIVING-WEIGHTS.md`](docs/LIVING-WEIGHTS.md) first. Four of its
 design decisions are the opposite of the obvious one, each for a measured
 reason, and the constants are calibrated against numbers that will not survive
 being changed casually.
+
+The sensor layer that replaces the simulated organism with a real one is in
+[`docs/LIVING-WEIGHTS-PHASE2.md`](docs/LIVING-WEIGHTS-PHASE2.md), along with
+the seven ways the first draft of it produced a confident, well-shaped,
+completely meaningless number.
 
 ## Primary references
 

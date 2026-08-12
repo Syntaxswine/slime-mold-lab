@@ -62,6 +62,29 @@ export type SyntheticConfig = {
   disturbAfterFrames: number;
   /** Sensor grain inside the dish, in luminance units. Also a focus reference. */
   grain: number;
+  /**
+   * Peristaltic contraction period, in seconds. 0 to render a culture that
+   * grows and moves but does not pulse.
+   *
+   * A real plasmodium contracts at 131 +/- 43 s (Alim et al. 2013) and that
+   * contraction modulates transmitted intensity directly. Without it here the
+   * band-power estimator has nothing to find and cannot be tested at all — a
+   * synthetic organism that only crawls would make a matched filter for
+   * pulsing look worthless, which is a fact about the fixture and not about
+   * the filter.
+   */
+  contractionSeconds: number;
+  /** Fractional thickness swing. Alim et al. model +/-10% of tube radius. */
+  contractionAmplitude: number;
+  /**
+   * Spatial wavelength of the contraction wave, in cells.
+   *
+   * The rhythm is not synchronous across the body: it travels. A single global
+   * sinusoid would make every channel read the same phase and the same
+   * amplitude, which would hide exactly the between-channel structure the
+   * eight channels exist to measure.
+   */
+  contractionWavelength: number;
   seed: number;
 };
 
@@ -77,6 +100,9 @@ export const DEFAULT_SYNTHETIC: SyntheticConfig = {
   bare: false,
   disturbAfterFrames: 0,
   grain: 4,
+  contractionSeconds: 131,
+  contractionAmplitude: 0.2,
+  contractionWavelength: 140,
   seed: 1234,
 };
 
@@ -130,6 +156,10 @@ export function makeSimulatedFrameSource(
     grab(): Frame {
       mold.advance(config.ticksPerFrame);
       const simulation = mold.simulation;
+      const seconds = timestampMs / 1000;
+      const pulsing = config.contractionSeconds > 0 && config.contractionAmplitude > 0;
+      const omega = pulsing ? (Math.PI * 2) / config.contractionSeconds : 0;
+      const waveNumber = (Math.PI * 2) / Math.max(1, config.contractionWavelength);
       const disturbed = source.framesRendered >= config.disturbAfterFrames;
       const benchNoise = disturbed ? config.benchNoise : 0;
       if (disturbed) exposure *= 1 + config.exposureDriftPerFrame;
@@ -155,6 +185,14 @@ export function makeSimulatedFrameSource(
             const trail = 1 - Math.exp(-simulation.trail[cell] * 0.15);
             const occupied = simulation.occupancy[cell] !== -1;
             value = occupied ? 210 : 14 + trail * 150;
+            if (pulsing) {
+              // A travelling contraction wave, modulating only where there is
+              // something to contract. Bare agar does not pulse, and a matched
+              // filter that found a rhythm there would be finding the renderer.
+              const body = Math.min(1, simulation.trail[cell] / 6);
+              const phase = omega * seconds - waveNumber * (dx + dy);
+              value *= 1 + config.contractionAmplitude * body * Math.sin(phase);
+            }
           } else {
             value = config.benchLuma + (benchNoise > 0 ? (noise() - 0.5) * 2 * benchNoise : 0);
           }

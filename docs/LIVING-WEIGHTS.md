@@ -186,6 +186,13 @@ A piece that quotes the third number is overselling itself by 3×.
 
 ## 8. Phase 2 — what has to be true
 
+> **Phase 2's sensor layer shipped 2026-08-12.** See
+> [`LIVING-WEIGHTS-PHASE2.md`](LIVING-WEIGHTS-PHASE2.md). Everything predicted
+> below held, and the section is kept as written so the prediction can still be
+> read against the outcome. One thing it did not predict: the reading should
+> not be broadband change at all, but the amplitude of the plasmodium's own
+> contraction rhythm.
+
 The provider contract does not change. What changes is that `raw` stops being a
 count on a lattice and starts being volts, or pixels, and every constant in
 `DEFAULT_NORMALIZE` and `valueScale` was measured on the lattice and **will not

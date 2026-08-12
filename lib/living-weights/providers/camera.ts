@@ -10,10 +10,13 @@
  * `camera-source.ts` has the webcam and video-element sources.
  */
 import {
+  CONTRACTION_BAND,
   DEFAULT_DISH,
   DEFAULT_QUALITY_LIMITS,
+  bandPower,
   dishRegions,
   frameQuality,
+  logTransmittance,
   readFrames,
   type Band,
   type DishGeometry,
@@ -90,6 +93,37 @@ export type CameraProviderConfig = {
    * not the organism having an opinion.
    */
   sessionExposure: Band;
+  /**
+   * How a region's reading is computed.
+   *
+   * `band-power` is the default and the science-accurate one: the RMS
+   * amplitude of the region's log-transmittance inside the plasmodium's
+   * contraction band. A plasmodium's peristalsis modulates cross-section at
+   * 131 +/- 43 s (Alim et al. 2013, PNAS 110(33):13306) and that modulation
+   * appears directly in transmitted intensity, so restricting to the band is a
+   * matched filter for an organism that is ALIVE AND PUMPING.
+   *
+   * `broadband` is the mean absolute frame-to-frame change. It is kept because
+   * it is cheap, needs no window, and is the right fallback when the frame
+   * interval is too coarse to resolve the rhythm — but it is owned by whatever
+   * makes the largest change in frame, and nearly everything that goes wrong
+   * with a camera makes a large broadband change. It cannot tell a pulsing
+   * tube from a sclerotium, from a dead one, or from compression noise.
+   */
+  estimator: "band-power" | "broadband";
+  /** Frequency band searched for the contraction rhythm. */
+  band: { lowHz: number; highHz: number };
+  /**
+   * Length of the analysis window, in seconds.
+   *
+   * Sets both the frequency resolution and the latency of the whole piece. At
+   * 1024 s the resolution is 0.98 mHz, so the 5-16.7 mHz band holds about 12
+   * bins and the estimator's relative spread is roughly sqrt(2/24) = 29%.
+   * Halving the window doubles that; doubling it halves it, at double the wait
+   * for the first token. This is the number that decides whether a sentence
+   * takes minutes or an hour.
+   */
+  windowSeconds: number;
 };
 
 export const DEFAULT_CAMERA_CONFIG: CameraProviderConfig = {
@@ -98,6 +132,9 @@ export const DEFAULT_CAMERA_CONFIG: CameraProviderConfig = {
   calibration: flatCalibration(DEFAULT_DISH.channelCount),
   qualityFrames: 6,
   sessionExposure: { good: 0.05, ceiling: 0.35 },
+  estimator: "band-power",
+  band: CONTRACTION_BAND,
+  windowSeconds: 1024,
   // A camera has the same startup problem the simulation had, for a different
   // reason: consumer auto-exposure and auto-white-balance take seconds to
   // settle, and every frame while they settle is a large, confident, entirely
@@ -118,6 +155,10 @@ export type CameraProvider = MoldSignalProvider & {
   benchReference: number;
   /** Bench frame-to-frame activity at rest. The rig's own grain floor. */
   benchActivityFloor: number;
+  /** Samples currently in the analysis window. */
+  windowFill: number;
+  /** Seconds between frames, measured rather than assumed. */
+  frameIntervalSeconds: number;
   /** |bench now - bench at warmup| / bench at warmup. */
   lastSessionDrift: number;
   framesSeen: number;
@@ -141,6 +182,17 @@ export function makeCameraProvider(
   let warmupBenchCount = 0;
   let warmupActivitySum = 0;
 
+  // A rolling window of each region's log transmittance, one sample per frame,
+  // spanning many readings. Band power needs to see whole cycles of a rhythm
+  // whose period is longer than the interval between tokens, so unlike the
+  // broadband accumulator this must NOT be cleared by a read.
+  const MAX_WINDOW = 4096;
+  const history = Array.from({ length: n }, () => new Float64Array(MAX_WINDOW));
+  const historyTime = new Float64Array(MAX_WINDOW);
+  const historyQuality = new Float64Array(MAX_WINDOW);
+  let historyCount = 0;
+  let historyHead = 0;
+
   const provider: CameraProvider = {
     id: `camera:${source.id}`,
     config: { ...config, source: source.config } as unknown as Record<string, unknown>,
@@ -152,6 +204,8 @@ export function makeCameraProvider(
     lastBackgroundActivity: 0,
     benchReference: 0,
     benchActivityFloor: 0,
+    windowFill: 0,
+    frameIntervalSeconds: 0,
     lastSessionDrift: 0,
     framesSeen: 0,
 
@@ -219,6 +273,18 @@ export function makeCameraProvider(
         for (let c = 0; c < n; c += 1) weighted[c] += (reading.corrected[c] ?? 0) * quality;
         weight += quality;
         pairs += 1;
+
+        for (let c = 0; c < n; c += 1) {
+          history[c][historyHead] = logTransmittance(
+            reading.regions[c]?.luminance ?? 0,
+            reading.referenceLuminance,
+          );
+        }
+        historyTime[historyHead] = frame.timestampMs / 1000;
+        historyQuality[historyHead] = quality;
+        historyHead = (historyHead + 1) % MAX_WINDOW;
+        historyCount = Math.min(historyCount + 1, MAX_WINDOW);
+
         previous = frame;
       }
       return clock;
@@ -226,23 +292,90 @@ export function makeCameraProvider(
 
     readSignals(candidateCount: number): Signal[] {
       const served = Math.min(candidateCount, n);
-      const integration = clamp01(pairs / config.qualityFrames);
-      const meanFrameQuality = pairs === 0 ? 0 : weight / pairs;
-      const quality = integration * meanFrameQuality;
-
       const out: Signal[] = [];
-      for (let c = 0; c < served; c += 1) {
-        const raw = weight > 0 ? Math.max(0, weighted[c] / weight - config.calibration.offset[c]) : 0;
-        const span = Math.max(1e-9, config.calibration.scale[c]);
-        out.push({
-          channel: c,
-          value: clamp01(raw / span),
-          raw,
-          timestamp: clock,
-          quality,
-        });
+
+      // Ordered oldest-to-newest slice of the rolling window.
+      const ordered = (channel: number, want: number) => {
+        const take = Math.min(want, historyCount);
+        const values = new Array<number>(take);
+        for (let i = 0; i < take; i += 1) {
+          const index = (historyHead - take + i + MAX_WINDOW) % MAX_WINDOW;
+          values[i] = history[channel][index];
+        }
+        return values;
+      };
+      const orderedMeta = (want: number) => {
+        const take = Math.min(want, historyCount);
+        let firstTime = 0;
+        let lastTime = 0;
+        let qualitySum = 0;
+        for (let i = 0; i < take; i += 1) {
+          const index = (historyHead - take + i + MAX_WINDOW) % MAX_WINDOW;
+          if (i === 0) firstTime = historyTime[index];
+          lastTime = historyTime[index];
+          qualitySum += historyQuality[index];
+        }
+        return {
+          take,
+          dt: take > 1 ? (lastTime - firstTime) / (take - 1) : 0,
+          meanQuality: take === 0 ? 0 : qualitySum / take,
+        };
+      };
+
+      if (config.estimator === "band-power") {
+        // Measured, never assumed: a live camera does not deliver frames on
+        // the interval you asked for, and getting dt wrong shifts the band.
+        const spanFrames = (() => {
+          const probe = orderedMeta(Math.min(historyCount, MAX_WINDOW));
+          if (probe.dt <= 0) return config.qualityFrames;
+          return Math.max(16, Math.min(MAX_WINDOW, Math.round(config.windowSeconds / probe.dt)));
+        })();
+        const meta = orderedMeta(spanFrames);
+        provider.windowFill = meta.take / spanFrames;
+        provider.frameIntervalSeconds = meta.dt;
+
+        // The window must hold whole cycles of the slowest rhythm searched for,
+        // or the lowest bins do not exist and the estimator quietly reports
+        // whatever the next bins up happen to contain.
+        const cyclesHeld = meta.dt > 0 ? (meta.take * meta.dt) / (1 / config.band.lowHz) : 0;
+        const readiness = clamp01(cyclesHeld / 2);
+
+        for (let c = 0; c < served; c += 1) {
+          const amplitude =
+            meta.take >= 8 && meta.dt > 0
+              ? bandPower(ordered(c, spanFrames), meta.dt, config.band.lowHz, config.band.highHz)
+              : 0;
+          const raw = Math.max(0, amplitude - config.calibration.offset[c]);
+          out.push({
+            channel: c,
+            value: clamp01(raw / Math.max(1e-12, config.calibration.scale[c])),
+            raw,
+            timestamp: clock,
+            quality: readiness * meta.meanQuality,
+          });
+        }
+      } else {
+        const integration = clamp01(pairs / config.qualityFrames);
+        const meanFrameQuality = pairs === 0 ? 0 : weight / pairs;
+        const quality = integration * meanFrameQuality;
+        provider.windowFill = integration;
+
+        for (let c = 0; c < served; c += 1) {
+          const raw =
+            weight > 0 ? Math.max(0, weighted[c] / weight - config.calibration.offset[c]) : 0;
+          out.push({
+            channel: c,
+            value: clamp01(raw / Math.max(1e-9, config.calibration.scale[c])),
+            raw,
+            timestamp: clock,
+            quality,
+          });
+        }
       }
 
+      // Only the broadband accumulator resets. The band-power window spans
+      // many readings by design: clearing it here would leave every read
+      // analysing a fraction of one cycle.
       weighted = new Float64Array(n);
       weight = 0;
       pairs = 0;
@@ -259,8 +392,12 @@ export function makeCameraProvider(
       warmupBenchSum = 0;
       warmupBenchCount = 0;
       warmupActivitySum = 0;
+      historyCount = 0;
+      historyHead = 0;
       provider.benchReference = 0;
       provider.benchActivityFloor = 0;
+      provider.windowFill = 0;
+      provider.frameIntervalSeconds = 0;
       provider.lastSessionDrift = 0;
       provider.framesSeen = 0;
       provider.lastFaults = [];
