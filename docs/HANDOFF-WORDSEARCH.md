@@ -1,8 +1,10 @@
 # Handoff — the plate reads a word search
 
-**Written 2026-08-12.** A design session, not a finished piece. Read this
-before touching `tools/wordsearch.mjs`; four designs were tried and three of
-them failed for reasons that are cheap to repeat and expensive to rediscover.
+**Written 2026-08-12, extended the same day when the plate was built.** Read
+this before touching any of the `wordsearch` tools: four designs were tried and
+three of them failed for reasons that are cheap to repeat and expensive to
+rediscover. §2 is the design that works, §4b is the picture it makes, §4 is the
+graveyard.
 
 ---
 
@@ -60,10 +62,12 @@ letters happen to sit near them.
 | true cells kept | **105 / 105**, all eighteen words |
 | surviving cells not in any answer | 11 of 196 |
 
-The eleven are **ties, not errors**. PACK keeps eight cells for a four-letter
-word: two chains of identical minimal cost. Tero's model keeps co-optimal
-routes and so does a real plasmodium — the shortest-path result is for a maze
-with a *unique* solution.
+The eleven are **ties, not errors**, and they fall on six words rather than
+one: PACK 4, AIRPORT 2, PASSPORT 2, FLIGHT 1, HOTEL 1, MOTEL 1. PACK is the
+clearest case — eight cells kept for a four-letter word, two chains of
+identical minimal cost. Tero's model keeps co-optimal routes and so does a real
+plasmodium; the shortest-path result is for a maze with a *unique* solution.
+`tests/wordsearch.test.mjs` pins that distribution.
 
 For VACATION the plate reabsorbs everything except row 1:
 
@@ -152,6 +156,74 @@ was a **clock**, and a clock cannot know whether a cell is on a route to
 anywhere. Replacing the clock with **throughput** dissolves it entirely, which
 is what §2 does.
 
+## 4b. The plate — built 2026-08-12
+
+`tools/wordsearch-plate-flow.mjs`. The flow solve says which cells are on a
+supply chain; this turns the conductances back into a dish and lets a culture
+draw them.
+
+**What each half does**, because it would be easy to overclaim either way. The
+solve decides *which cells are worth holding* and the culture cannot argue with
+it. The culture decides *where the tissue goes*, and the tube between two
+letters is drawn by the Jones agents following an attractant field, with
+nothing telling them where a chain is. That is the arrangement in Tero et al.'s
+own Tokyo experiment: food where the cities are, and the organism draws the
+network.
+
+**The one coupling.** A cell's attractant is its live supply — the largest
+conductance of any tube meeting it — not a fixed flake. The owner's supply
+chain taken literally: a cell on a live tube is being fed from the chain and
+holds tissue, a cell on a reabsorbed tube has nothing arriving and cannot. The
+scale is set so the engine's own attention threshold does the killing, which is
+the part worth keeping:
+
+| | |
+|---|---|
+| `sampleField` ignores food below | **0.015** |
+| so at 0.09 per unit of conductance a cell goes dark at | **D < 0.167** |
+| the losers cross that at about | **step 6** |
+| the answer converges to D = 0.5, i.e. level | **0.045** — mid-window |
+
+No threshold was invented for this. The measured food window is 0.02–0.06 and
+the answer lands in the middle of it.
+
+**Where the time goes.** The solve is finished long before a culture could
+have crossed the plate — 55 candidate cells at step 0, 21 by step 12, 14 by 20,
+the 8 true cells from step 30 on. So the film is `colonise` (network frozen at
+step 0, everything fed, the culture spreads over all of it), `adapt` (one Tero
+step every 12 ticks), `settle`. About 1100 ticks, 24 s.
+
+**Measured, VACATION**, and the control arm is the point:
+
+| | tissue on the answer | on the word's other letters | contrast |
+|---|---|---|---|
+| the search | **87.6%** | 1.8% | **48.1×** |
+| control: network never adapts | 46.0% | 39.3% | **1.17×** |
+
+**Three numbers, three rankings — and none of them picks the picture.** This
+cost a wrong choice before it was noticed:
+
+| variant | disc contrast | ribbon fill | ribbon : substrate |
+|---|---|---|---|
+| forage 7500 | 58.7× | 66.5% | 7.65× |
+| forage 4200 | **103.2×** | 46.8% | **11.09×** |
+| minimal | 48.1× | **88.6%** | 9.59× |
+| reticulate | 51.0× | 61.0% | 4.57× |
+
+The thin culture wins two of the three and loses the picture: at 4200 agents
+the link between letters is a thread, so the plate reads as eight separate lit
+rings and not as a word. Disc occupancy scores how *packed the letters* are;
+what makes a word legible is the unbroken ribbon *between* them, which lies in
+the gaps that disc occupancy never looks at. Legibility needs the ribbon nearly
+solid **and** the substrate quiet, and `minimal` is the only variant good at
+both. It is the default for that reason and not because it looked nicer.
+
+**Scars.** A cell that was supplied and then fell below the attention threshold
+leaves an aversion disc at level 0.012, from the measured window of 0.008–0.02.
+47 of them by the end of VACATION. This is the part of the owner's original
+idea that the flow design does not need and the picture does: without it the
+failed search simply vanishes, and the plate shows an answer instead of a hunt.
+
 ## 5. Traps paid for
 
 - **Scars must be weak.** Across 84 aversion discs on a 196-cell plate: at
@@ -169,38 +241,55 @@ is what §2 does.
 - **A "no reuse" rule must mean "not spent on an *earlier* letter."** Written
   as `stage === -1` it also stops a cell being fed during its own stage: the
   cell took one mouthful, became spent, and starved eighteen ticks later.
+- **A metric that agrees with everything is not measuring anything.** Disc
+  contrast said 103× for the variant whose picture is a broken thread. It was
+  answering a question nobody asked. See §4b.
+- **The suite let one mutation through.** Moving the `onStep` callback one
+  statement earlier in the adaptation loop — which would put every frame of the
+  film out of phase with the search it claims to show — left all seven tests
+  green. Caught by mutation testing, not by review, and now pinned by asserting
+  the conductance the callback sees at step 0. Of four deliberate breakages the
+  suite killed three; the fourth is documented as slack rather than pretended
+  to be tested.
 - **The grid is transcribed by eye** from the puzzle image and has never been
   checked character by character. Every number in this document rests on it.
   Verifying it is the cheapest possible first task.
 
 ## 6. What to build next
 
-1. **The plate.** This is the flow network, not the picture. The converged
-   conductances map back onto the 360×240 lattice as attractant, and the Jones
-   agents grow along the surviving tubes — the culture physically draws what
-   the flow already decided. `tools/wordsearch-plate.mjs` already holds the
-   grid-to-lattice mapping and the PNG painter for living tissue, fed letters
-   and scars; it needs a different source of truth about what should be alive.
-2. **Show the search, not just the answer.** The conductances tell a story over
-   time: everything thick at first, then thinning onto the chains. Rendering
-   the adaptation as frames is the piece, and the finished plate is the print.
-3. **Scars.** The flow design has no aversion mechanism yet, because it does
-   not need one. Whether reabsorbed tubes should scar is an aesthetic call —
-   it would make the failed search legible in the final image, which was the
-   original appeal.
-4. **A denser puzzle.** On this grid the eighteen true answers already occupy
-   96 of 196 cells — **49%** — so "everything dies but the answer" can never
-   clear more than half the plate. Hunting one word at a time retreats to
-   2–5%, which is the dramatic version. A larger, sparser grid would let the
-   all-words plate be dramatic too.
+1. **Check the grid.** Still the cheapest and still not done. Every number in
+   this document, and every plate, rests on fourteen rows typed from a picture.
+2. **A denser puzzle.** On this grid the eighteen true answers already occupy
+   96 of 196 cells — **49%** — so an all-words plate can never clear more than
+   half of it. One word at a time retreats to 2–5%, which is why the built
+   piece hunts one word. A larger, sparser grid would let the all-words plate
+   be dramatic too, and it would also break the reliance on this transcription.
+3. **An all-words mode.** Eighteen solves, the supplies unioned, one plate.
+   Cheap now that the solve is a module: `adapt()` per word, merge the supply
+   maps, feed the same renderer. Worth doing on the sparser grid rather than
+   this one, for the reason above.
+4. **A real culture.** Everything here is the digital plasmodium. The same
+   plate — a puzzle printed in oat flakes, imaged over hours — is what the
+   Living Weights Phase 2 camera stack was built to read. That is the version
+   that stops being a simulation of an idea.
+5. **Timelapse encoding.** The contact sheet is the whole search in one image
+   and it is a compromise; frames go out as PNGs and nothing in the repo turns
+   them into a movie.
 
 ## 7. Files
 
 | path | what |
 |---|---|
-| `tools/wordsearch.mjs` | the flow design. census, per-word plate, `--compare` |
-| `tools/wordsearch-plate.mjs` | superseded staged-food prototype; kept for its lattice mapping, its PNG painter, and its record |
+| `tools/wordsearch-flow.mjs` | the network and Tero's adaptation. `adapt(word, {onStep})` and `supply(net)` |
+| `tools/wordsearch.mjs` | the census over it. per-word plate, `--compare` |
+| `tools/wordsearch-plate-flow.mjs` | **the piece.** grows a culture on the solve; frames, print, contact sheet |
+| `tools/wordsearch-plate.mjs` | superseded staged-food prototype; kept for its record |
 | `tools/png.mjs` | dependency-free PNG writer, extracted from `render.mjs` |
+| `tests/wordsearch.test.mjs` | 8 tests. pins the census, the tie distribution, the cost model, the reach finding, and the callback's phase |
+
+The extraction of `wordsearch-flow.mjs` out of `wordsearch.mjs` was checked by
+diffing the census and the VACATION plate against the single-file version
+before anything new was built on it: byte identical.
 
 `tools/render.mjs` still carries its own copy of the PNG encoder and could now
 import `tools/png.mjs` instead. Left alone deliberately: it is a working tool

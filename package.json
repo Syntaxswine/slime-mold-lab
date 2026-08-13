@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/living-weights.test.mjs tests/living-weights-sensor.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/living-weights.test.mjs tests/living-weights-sensor.test.mjs tests/wordsearch.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern work",
     "db:generate": "drizzle-kit generate"
   },

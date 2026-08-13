@@ -17,14 +17,10 @@
  * cell is on a route to anywhere. `tools/wordsearch.mjs` replaces the clock
  * with THROUGHPUT and the tension disappears.
  *
- * Why this file survives anyway. It holds two things the flow design still
- * needs and nothing else in the repo has: the mapping of a puzzle grid onto
- * the 360x240 lattice, and the plate painter that draws living tissue, fed
- * letters and scars as a PNG. The render step of the flow design is those two
- * pieces plus a different source of truth about what should be alive.
- *
- * It also records what the measurements cost, which is the part that is
- * expensive to rediscover:
+ * Why this file survives anyway. Its grid-to-lattice mapping and its plate
+ * painter were what the flow design's renderer was built from, and that
+ * renderer now exists as `tools/wordsearch-plate-flow.mjs`; so what is left
+ * here is the record, which is the expensive part:
  *
  *   - Scars must be weak. Measured across 84 aversion discs on a 196-cell
  *     plate: at level 1 the culture's own trail decides 0% of its turns and it

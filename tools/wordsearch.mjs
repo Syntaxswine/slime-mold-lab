@@ -29,10 +29,13 @@
  *   105 of 105 true cells kept across all eighteen words
  *   11 surviving cells out of 196 that are not in any answer
  *
- * and those eleven are TIES, not mistakes. PACK keeps eight cells for a
- * four-letter word: two chains of identical minimal cost. Tero's model keeps
- * co-optimal routes and so does a real plasmodium — the famous shortest-path
- * result is for a maze with a unique solution.
+ * and those eleven are TIES, not mistakes. They fall on six words, not one —
+ * PACK 4, AIRPORT 2, PASSPORT 2, FLIGHT 1, HOTEL 1, MOTEL 1 — with PACK the
+ * clearest case: eight cells kept for a four-letter word, two chains of
+ * identical minimal cost. Tero's model keeps co-optimal routes and so does a
+ * real plasmodium; the famous shortest-path result is for a maze with a unique
+ * solution. `tests/wordsearch.test.mjs` pins that distribution, so a change to
+ * it has to be re-argued rather than absorbed.
  *
  * WHICH CONSTANT DECIDES THE ANSWER
  *
@@ -58,36 +61,18 @@
  *   the physics correctly finds the shortest chain and it is not the puzzle's.
  *   Euclidean scores 99/105; lattice steps score 105/105.
  *
- * WHAT IS NOT HERE. This is the flow network, not the plate. The picture — the
- * culture physically growing along the surviving tubes — is the next step, and
- * `tools/wordsearch-plate.mjs` already holds the lattice mapping and the PNG
- * painter it needs. See docs/HANDOFF-WORDSEARCH.md.
+ * WHERE THE CODE IS. The network and the adaptation live in
+ * `tools/wordsearch-flow.mjs`, shared with `tools/wordsearch-plate-flow.mjs`,
+ * which grows a culture on the answer. This file is the census over it.
  *
  *   node tools/wordsearch.mjs                       # census over every word
  *   node tools/wordsearch.mjs --word VACATION       # one word, with its chain
  *   node tools/wordsearch.mjs --reach 1 --compare   # what each knob costs
  */
-
-/* --- the puzzle ------------------------------------------------------ */
-
-// Transcribed by eye from the Tree Valley Academy "Vacation" word search.
-// TREAT AS APPROXIMATE: it has not been checked against the original character
-// by character, and every number this tool prints rests on it.
-const GRID = [
-  "YNCGDXRKOSMJEP", "SBZUHNOITACAVL", "OQTJWESPHYFIDM", "HARNCVBLGWXRKZ",
-  "CMOTELJDIFHPSU", "AGPYLWTNLQZLXB", "ESRAHEDBFNUAML", "BHIFSOVXZKLNPE",
-  "FKAPWSHACEDELT", "XVOBQUPMRJPGFO", "NOYADILOHTEIKH", "LUSXVGZWRBVCRA",
-  "DJFMTICKETAYQT", "RENIHSNUSPOBWG",
-].map((r) => r.split(""));
-
-const WORDS = [
-  "AIRPORT", "AIRPLANE", "BEACH", "FLIGHT", "FUN", "HOLIDAY", "HOTEL", "MOTEL",
-  "PACK", "PASSPORT", "POOL", "RELAX", "SUNSHINE", "TICKET", "TRAVEL", "TRIP",
-  "VACATION", "WINDOW",
-];
-
-const H = GRID.length;
-const W = GRID[0].length;
+import {
+  GRID, WORDS, H, W, MU, RATE, ALIVE,
+  stepCost, euclidCost, trueRun, adapt,
+} from "./wordsearch-flow.mjs";
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback) => {
@@ -98,142 +83,11 @@ const ONLY = arg("word", null);
 const REACH = Number(arg("reach", 2));
 const STEPS = Number(arg("steps", 400));
 const COMPARE = argv.includes("--compare");
-/** Conductance below which a tube counts as reabsorbed. */
-const ALIVE = Number(arg("alive", 0.05));
-/** Tero's f(Q) = Q^mu / (1 + Q^mu). Above 1 it sharpens onto single routes. */
-const MU = Number(arg("mu", 1.4));
-const RATE = Number(arg("rate", 0.25));
-
-const stepCost = (dr, dc) => Math.max(Math.abs(dr), Math.abs(dc));
-const euclidCost = (dr, dc) => Math.hypot(dr, dc);
-
-/* --- the puzzle's own answer, for scoring ---------------------------- */
-
-const D8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
-
-/** Where the word really is: a straight run of adjacent cells. */
-function trueRun(word) {
-  for (let r = 0; r < H; r += 1) {
-    for (let c = 0; c < W; c += 1) {
-      if (GRID[r][c] !== word[0]) continue;
-      for (const [dr, dc] of D8) {
-        const cells = [];
-        let ok = true;
-        for (let k = 0; k < word.length; k += 1) {
-          const rr = r + dr * k;
-          const cc = c + dc * k;
-          if (rr < 0 || rr >= H || cc < 0 || cc >= W || GRID[rr][cc] !== word[k]) { ok = false; break; }
-          cells.push(`${rr},${cc}`);
-        }
-        if (ok) return cells;
-      }
-    }
-  }
-  return [];
-}
-
-/* --- the network ------------------------------------------------------ */
-
-function build(word, reach, cost) {
-  const nodes = [];
-  const index = new Map();
-  for (let k = 0; k < word.length; k += 1) {
-    for (let r = 0; r < H; r += 1) {
-      for (let c = 0; c < W; c += 1) {
-        if (GRID[r][c] !== word[k]) continue;
-        index.set(`${k}|${r},${c}`, nodes.length);
-        nodes.push({ k, r, c });
-      }
-    }
-  }
-
-  const edges = [];
-  for (let i = 0; i < nodes.length; i += 1) {
-    const { k, r, c } = nodes[i];
-    if (k === word.length - 1) continue;
-    for (let dr = -reach; dr <= reach; dr += 1) {
-      for (let dc = -reach; dc <= reach; dc += 1) {
-        if (!dr && !dc) continue;
-        const j = index.get(`${k + 1}|${r + dr},${c + dc}`);
-        if (j === undefined) continue;
-        edges.push({ a: i, b: j, len: cost(dr, dc), D: 1 });
-      }
-    }
-  }
-
-  // A source feeding every first letter and a sink draining every last one.
-  // Short stubs, so the choice of where to enter and leave costs almost
-  // nothing and the competition is between the chains themselves.
-  const source = nodes.length;
-  const sink = nodes.length + 1;
-  for (let i = 0; i < nodes.length; i += 1) {
-    if (nodes[i].k === 0) edges.push({ a: source, b: i, len: 0.35, D: 1 });
-    if (nodes[i].k === word.length - 1) edges.push({ a: i, b: sink, len: 0.35, D: 1 });
-  }
-  return { nodes, edges, source, sink, size: nodes.length + 2 };
-}
-
-/** Solve L p = b for the node pressures, with the sink pinned to zero. */
-function pressures(net) {
-  const n = net.size;
-  const M = Array.from({ length: n }, () => new Float64Array(n + 1));
-  for (const e of net.edges) {
-    const g = e.D / e.len;
-    M[e.a][e.a] += g;
-    M[e.b][e.b] += g;
-    M[e.a][e.b] -= g;
-    M[e.b][e.a] -= g;
-  }
-  M[net.source][n] = 1;
-  for (let j = 0; j < n; j += 1) M[net.sink][j] = 0;
-  M[net.sink][net.sink] = 1;
-  M[net.sink][n] = 0;
-
-  for (let col = 0; col < n; col += 1) {
-    let pivot = col;
-    for (let r = col + 1; r < n; r += 1) {
-      if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot = r;
-    }
-    if (Math.abs(M[pivot][col]) < 1e-12) continue;
-    [M[col], M[pivot]] = [M[pivot], M[col]];
-    for (let r = 0; r < n; r += 1) {
-      if (r === col) continue;
-      const f = M[r][col] / M[col][col];
-      if (!f) continue;
-      for (let cc = col; cc <= n; cc += 1) M[r][cc] -= f * M[col][cc];
-    }
-  }
-
-  const p = new Float64Array(n);
-  for (let i = 0; i < n; i += 1) p[i] = Math.abs(M[i][i]) < 1e-12 ? 0 : M[i][n] / M[i][i];
-  return p;
-}
-
-/** Adapt until the network stops changing. Returns the cells still supplied. */
-function adapt(word, { reach = REACH, cost = stepCost, steps = STEPS } = {}) {
-  const net = build(word, reach, cost);
-  if (net.nodes.length === 0) return { live: new Set(), net, chains: [] };
-
-  for (let step = 0; step < steps; step += 1) {
-    const p = pressures(net);
-    for (const e of net.edges) {
-      const q = Math.abs((e.D * (p[e.a] - p[e.b])) / e.len);
-      const f = q ** MU / (1 + q ** MU);
-      e.D += RATE * (f - e.D);
-      if (e.D < 1e-9) e.D = 1e-9;
-    }
-  }
-
-  const live = new Set();
-  const kept = [];
-  for (const e of net.edges) {
-    if (e.D <= ALIVE) continue;
-    kept.push(e);
-    if (e.a < net.nodes.length) live.add(`${net.nodes[e.a].r},${net.nodes[e.a].c}`);
-    if (e.b < net.nodes.length) live.add(`${net.nodes[e.b].r},${net.nodes[e.b].c}`);
-  }
-  return { live, net, kept };
-}
+const TUNING = {
+  alive: Number(arg("alive", ALIVE)),
+  mu: Number(arg("mu", MU)),
+  rate: Number(arg("rate", RATE)),
+};
 
 /* --- reporting -------------------------------------------------------- */
 
@@ -245,7 +99,7 @@ function census(label, options) {
   let extraAll = 0;
   for (const word of ONLY ? [ONLY.toUpperCase()] : WORDS) {
     const answer = new Set(trueRun(word));
-    const { live, net } = adapt(word, options);
+    const { live, net } = adapt(word, { ...TUNING, ...options });
     const kept = [...answer].filter((c) => live.has(c)).length;
     const extra = [...live].filter((c) => !answer.has(c)).length;
     keptAll += kept;
@@ -278,7 +132,7 @@ if (COMPARE) {
     let extraAll = 0;
     for (const word of WORDS) {
       const answer = new Set(trueRun(word));
-      const { live } = adapt(word, options);
+      const { live } = adapt(word, { ...TUNING, ...options });
       keptAll += [...answer].filter((c) => live.has(c)).length;
       trueAll += answer.size;
       extraAll += [...live].filter((c) => !answer.has(c)).length;
@@ -295,7 +149,7 @@ if (COMPARE) {
 
   if (ONLY) {
     const word = ONLY.toUpperCase();
-    const { live } = adapt(word, { reach: REACH, cost: stepCost, steps: STEPS });
+    const { live } = adapt(word, { ...TUNING, reach: REACH, cost: stepCost, steps: STEPS });
     const answer = new Set(trueRun(word));
     console.log(`\n  ${word} — surviving cells, . = reabsorbed, # = also in the puzzle's own run\n`);
     for (let r = 0; r < H; r += 1) {
