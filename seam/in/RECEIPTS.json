@@ -1,0 +1,21 @@
+{
+  "seam/in/substrate-N5.json": {
+    "fileSha256": "4a8e1faa3ae494a37dfd740b579b182462a236e9a8b3639f09193357eb18fcbe",
+    "consumedFrom": "topographic-moire/research/substrate/out/substrate-N5.json",
+    "consumedAt": "2026-08-28"
+  },
+  "seam/in/targets-N5.json": {
+    "fileSha256": "139f0f033d086bae5f5edb984f869ebe92d4125b29c9335a0e05d0d56ce00265",
+    "consumedFrom": "topographic-moire/research/substrate/out/targets-N5.json",
+    "consumedAt": "2026-08-28"
+  },
+  "seam/in/oracle-routes-N5.json": {
+    "fileSha256": "bee622a38548771bdd6b56ab100b4b468dfdd1ee46d4f90e4dcaf92135a8117b",
+    "consumedFrom": "topographic-moire/research/substrate/out/routes-dijkstra-N5.json",
+    "consumedAt": "2026-08-28"
+  },
+  "internalReceipts": {
+    "substrate": "457ac76e5f248b855705890f2d08675a80bab9aebe79b454f57ce08fdbad5a73",
+    "targets": "8201ec122f221d3c668c9ffc139205ffffee8990b7d7572f1428a7d84de93bb8"
+  }
+}
