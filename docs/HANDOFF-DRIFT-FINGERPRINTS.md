@@ -1,6 +1,7 @@
 # Handoff — can a flow fingerprint verify data?
 
-**Written 2026-08-12/13.** One arc across two repos. It began as a question
+**Work done 2026-08-12/13; handoff written and re-verified 2026-08-28.** One
+arc across two repos. It began as a question
 about the word-search solver, produced a negative result worth keeping, and
 ended by finding a real defect in a different project's drift controls. Read
 [`HANDOFF-WORDSEARCH.md`](HANDOFF-WORDSEARCH.md) first for the solver itself.
@@ -131,9 +132,11 @@ audit always reports what an operator would really see. The finding came back
 identical to the instance, which is the evidence the copy had been faithful —
 obtainable only by keeping the original.
 
-**Verified 2026-08-13, 178 commits later: `baseline-diff.mjs` is still
-byte-identical to its pre-work state and the audit still runs.** The additive
-property held across all of it.
+**Re-verified 2026-08-28 — 178 commits later, vugg HEAD at `63f7f51`:
+`baseline-diff.mjs` is still byte-identical to its pre-work state, nothing has
+touched the three new files, and the audit still runs.** The additive property
+held across all of it. The finding has grown with the fleet: 44 bumps / 136
+scenario-instances when first measured at v237, **67 / 280 at v271**.
 
 ## 6. Open
 
